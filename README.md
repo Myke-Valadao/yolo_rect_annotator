@@ -32,12 +32,14 @@ pip install opencv-python numpy
 
 ## ▶️ Usage
 
+```bash
 python annotate_video_yolo.py \
   --video /path/to/video.mp4 \
   --outdir dataset \
   --img-prefix myke \
   --skip 0 \
   --start 0
+```
 
 ## Arguments
 
