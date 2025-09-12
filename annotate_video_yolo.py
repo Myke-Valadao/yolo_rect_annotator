@@ -6,8 +6,11 @@ YOLO Rect Annotator
 -------------------
 - Desenho de múltiplos BBOX (retângulos) com o mouse.
 - Após soltar o mouse, você digita no terminal o ID numérico da classe daquele BBOX.
+- Mostra o ID da classe no topo central do bbox (com fundo preto).
 - Salva frames (.jpg) e labels no formato YOLO (.txt) com coordenadas NORMALIZADAS.
-- Teclas:
+- A janela é criada no TAMANHO ORIGINAL DO VÍDEO.
+
+Teclas:
     q = sair
     n = próximo frame (descarta BBOX não salvos)
     s = salvar BBOX do frame atual (gera .jpg e .txt)
@@ -19,16 +22,11 @@ Uso:
         --video /caminho/para/video.mp4 \
         --outdir dataset \
         --img-prefix myke \
-        --skip 0
-
-Saídas:
-- Imagens em:   <outdir>/images/
-- Anotações em: <outdir>/labels/
-  (um .txt por imagem, linhas: "<class_id> x_center y_center width height")
+        --skip 0 \
+        --start 0
 """
 
 import argparse
-import os
 from pathlib import Path
 from typing import List, Tuple, Dict
 
@@ -71,20 +69,31 @@ def to_yolo(x1, y1, x2, y2, img_w, img_h):
     return xc, yc, w, h
 
 
+def put_label(canvas, text, x1, y1, x2, y2):
+    """Escreve o rótulo (texto) no topo central do bbox, com fundo para contraste."""
+    tx = int((x1 + x2) / 2)
+    ty = max(0, y1 - 8)
+    (tw, th), bl = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+    # caixa de fundo (preta)
+    cv2.rectangle(canvas,
+                  (tx - tw // 2 - 4, ty - th - 4),
+                  (tx + tw // 2 + 4, ty + 2),
+                  (0, 0, 0), -1)
+    # texto (amarelo)
+    cv2.putText(canvas, text, (tx - tw // 2, ty - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+
+
 def draw_all_boxes(canvas, boxes, color=(0, 255, 0)):
-    for i, item in enumerate(boxes):
+    """Desenha todos os bboxes com suas classes no topo central."""
+    for item in boxes:
         (x1, y1) = item["pt1"]
         (x2, y2) = item["pt2"]
         cls = item["cls"]
+        # retângulo
         cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
-        # rótulo no topo central do bbox
-        tx = int((x1 + x2) / 2)
-        ty = min(y1 - 8, canvas.shape[0] - 1)
-        label = f"{cls}"
-        # fundo do texto
-        (tw, th), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(canvas, (tx - tw // 2 - 4, ty - th - 4), (tx + tw // 2 + 4, ty + 2), (0, 0, 0), -1)
-        cv2.putText(canvas, label, (tx - tw // 2, ty - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+        # rótulo com a classe
+        put_label(canvas, f"{cls}", x1, y1, x2, y2)
 
 
 def mouse_cb(event, x, y, flags, param):
@@ -111,10 +120,11 @@ def mouse_cb(event, x, y, flags, param):
         pending_bbox = {"pt1": (x1, y1), "pt2": (x2, y2)}
         awaiting_class_input = True
 
-        # mostra visualmente o bbox pendente (sem classe ainda)
+        # mostra visualmente o bbox pendente (sem classe ainda), em cor distinta
         image_copy[:] = image
         draw_all_boxes(image_copy, bboxes)
         cv2.rectangle(image_copy, (x1, y1), (x2, y2), (0, 200, 255), 2)
+        put_label(image_copy, "id?", x1, y1, x2, y2)  # dica visual
         cv2.imshow('Frame', image_copy)
 
 
@@ -141,16 +151,27 @@ def main():
         return
 
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or -1
-    print(f"[INFO] Vídeo aberto. Frames: {total if total>0 else 'desconhecido'}")
+    print(f"[INFO] Vídeo aberto. Frames: {total if total > 0 else 'desconhecido'}")
 
     # posiciona no frame inicial
     if args.start > 0:
         cap.set(cv2.CAP_PROP_POS_FRAMES, args.start)
 
+    # lê um frame para obter dimensões e configurar a janela no tamanho ORIGINAL do vídeo
+    ret, first_frame = cap.read()
+    if not ret:
+        print("Erro ao ler o primeiro frame.")
+        return
+    h0, w0 = first_frame.shape[:2]
+
+    # cria janela e ajusta ao tamanho original do vídeo
     cv2.namedWindow('Frame', cv2.WINDOW_NORMAL)
+    cv2.resizeWindow('Frame', w0, h0)
     cv2.setMouseCallback('Frame', mouse_cb)
 
-    frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+    # reposiciona para o frame inicial novamente
+    cap.set(cv2.CAP_PROP_POS_FRAMES, args.start)
+    frame_idx = args.start
     saved_count = 0
 
     while True:
@@ -179,7 +200,6 @@ def main():
 
             # se acabamos de desenhar um bbox, pedir a classe no terminal
             if awaiting_class_input:
-                # organiza e clipe
                 (x1, y1) = pending_bbox["pt1"]
                 (x2, y2) = pending_bbox["pt2"]
                 x1, y1, x2, y2 = clip_rect(x1, y1, x2, y2, w, h)
@@ -193,6 +213,12 @@ def main():
                         cls_id = int(cls_str)
                         bboxes.append({"pt1": (x1, y1), "pt2": (x2, y2), "cls": cls_id})
                         print(f"[OK] BBOX adicionado com classe {cls_id}. Total no frame: {len(bboxes)}")
+
+                        # refresh visual imediato
+                        image_copy[:] = image
+                        draw_all_boxes(image_copy, bboxes)
+                        cv2.imshow('Frame', image_copy)
+                        cv2.waitKey(1)
                     except ValueError:
                         print("[ERRO] Valor inválido. BBOX descartado.")
                     awaiting_class_input = False
@@ -231,10 +257,10 @@ def main():
 
                 with open(lbl_path, "w") as f:
                     for item in bboxes:
-                        (x1, y1) = item["pt1"]
-                        (x2, y2) = item["pt2"]
-                        x1, y1, x2, y2 = clip_rect(x1, y1, x2, y2, w, h)
-                        xc, yc, ww, hh = to_yolo(x1, y1, x2, y2, w, h)
+                        (bx1, by1) = item["pt1"]
+                        (bx2, by2) = item["pt2"]
+                        bx1, by1, bx2, by2 = clip_rect(bx1, by1, bx2, by2, w, h)
+                        xc, yc, ww, hh = to_yolo(bx1, by1, bx2, by2, w, h)
                         f.write(f"{item['cls']} {xc:.6f} {yc:.6f} {ww:.6f} {hh:.6f}\n")
 
                 saved_count += 1
@@ -246,7 +272,7 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
     print(f"[DONE] Frames salvos: {saved_count}")
-    
+
 
 if __name__ == "__main__":
     main()
