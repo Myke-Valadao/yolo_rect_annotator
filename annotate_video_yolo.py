@@ -8,7 +8,8 @@ YOLO Rect Annotator
 - Após soltar o mouse, você digita no terminal o ID numérico da classe daquele BBOX.
 - Mostra o ID da classe no topo central do bbox (com fundo preto).
 - Salva frames/imagens (.jpg) e labels no formato YOLO (.txt) com coordenadas NORMALIZADAS.
-- A janela é criada no TAMANHO ORIGINAL do primeiro frame/imagem.
+- A janela exibe a imagem no tamanho original, reduzida apenas se for maior que a tela
+  (os arquivos salvos sempre mantêm a resolução original).
 - Funciona com um VÍDEO ou com IMAGENS (uma pasta, um padrão glob ou um único arquivo).
 
 Teclas:
@@ -61,6 +62,12 @@ bboxes: List[Dict] = []
 awaiting_class_input: bool = False
 pending_bbox: Dict = {}
 
+# Fator de escala entre a imagem original (usada para salvar) e o que é exibido na janela
+# (imagens maiores que a tela são reduzidas apenas para exibição; coordenadas de mouse são
+# convertidas de volta para a resolução original antes de guardar o bbox).
+display_scale: float = 1.0
+
+WINDOW_NAME = "Frame"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
 
@@ -111,8 +118,67 @@ def draw_all_boxes(canvas, boxes, color=(0, 255, 0)):
         put_label(canvas, f"{cls}", x1, y1, x2, y2)
 
 
+def draw_pending_box(canvas, pending):
+    """Desenha o bbox recém-desenhado (ainda sem classe), em cor distinta."""
+    if not pending:
+        return
+    (x1, y1) = pending["pt1"]
+    (x2, y2) = pending["pt2"]
+    cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 200, 255), 2)
+    put_label(canvas, "id?", x1, y1, x2, y2)
+
+
+def get_screen_size(default: Tuple[int, int] = (1600, 900)) -> Tuple[int, int]:
+    """Tenta detectar a resolução da tela; usa um valor padrão se não conseguir (ex.: ambiente sem GUI)."""
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        w, h = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.destroy()
+        if w > 0 and h > 0:
+            return w, h
+    except Exception:
+        pass
+    return default
+
+
+def compute_display_scale(w: int, h: int, max_w: int, max_h: int) -> float:
+    """Fator (<=1.0) para reduzir a imagem à tela, sem nunca ampliar."""
+    return min(1.0, max_w / w, max_h / h)
+
+
+def show_frame(canvas):
+    """Exibe o canvas (em resolução original) já reduzido pelo display_scale, se necessário."""
+    if display_scale < 1.0:
+        disp_w = max(1, int(round(canvas.shape[1] * display_scale)))
+        disp_h = max(1, int(round(canvas.shape[0] * display_scale)))
+        canvas = cv2.resize(canvas, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+    cv2.imshow(WINDOW_NAME, canvas)
+
+
+def to_original_coords(x: int, y: int) -> Tuple[int, int]:
+    """Converte coordenadas recebidas da janela (possivelmente reduzida) para a imagem original."""
+    if display_scale < 1.0:
+        return int(round(x / display_scale)), int(round(y / display_scale))
+    return x, y
+
+
+def bring_window_to_front():
+    """Traz a janela para frente/foco (útil após ler input() no terminal, que rouba o foco)."""
+    try:
+        cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_TOPMOST, 1)
+        cv2.waitKey(1)
+        cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_TOPMOST, 0)
+        cv2.waitKey(1)
+    except Exception:
+        pass
+
+
 def mouse_cb(event, x, y, flags, param):
     global ref_point, drawing, image, image_copy, awaiting_class_input, pending_bbox
+
+    x, y = to_original_coords(x, y)
 
     if event == cv2.EVENT_LBUTTONDOWN and not awaiting_class_input:
         ref_point = [(x, y)]
@@ -123,7 +189,7 @@ def mouse_cb(event, x, y, flags, param):
         # desenha os já existentes
         draw_all_boxes(image_copy, bboxes)
         cv2.rectangle(image_copy, ref_point[0], (x, y), (0, 255, 0), 2)
-        cv2.imshow('Frame', image_copy)
+        show_frame(image_copy)
 
     elif event == cv2.EVENT_LBUTTONUP and drawing and not awaiting_class_input:
         ref_point.append((x, y))
@@ -138,9 +204,8 @@ def mouse_cb(event, x, y, flags, param):
         # mostra visualmente o bbox pendente (sem classe ainda), em cor distinta
         image_copy[:] = image
         draw_all_boxes(image_copy, bboxes)
-        cv2.rectangle(image_copy, (x1, y1), (x2, y2), (0, 200, 255), 2)
-        put_label(image_copy, "id?", x1, y1, x2, y2)  # dica visual
-        cv2.imshow('Frame', image_copy)
+        draw_pending_box(image_copy, pending_bbox)
+        show_frame(image_copy)
 
 
 def collect_image_paths(images_arg: str) -> List[Path]:
@@ -201,7 +266,7 @@ def iter_image_source(image_paths: List[Path], start: int, skip: int) -> Iterato
 
 
 def main():
-    global image, image_copy, bboxes, awaiting_class_input, pending_bbox
+    global image, image_copy, bboxes, awaiting_class_input, pending_bbox, display_scale
 
     ap = argparse.ArgumentParser(description="Ferramenta simples para anotar BBOX retangulares no formato YOLO.")
     src_group = ap.add_mutually_exclusive_group(required=True)
@@ -236,19 +301,24 @@ def main():
         print(f"[INFO] {len(image_paths)} imagem(ns) encontrada(s).")
         source = iter_image_source(image_paths, args.start, args.skip)
 
-    # lê o primeiro item para obter dimensões e configurar a janela no tamanho original
+    # lê o primeiro item para obter dimensões e configurar a janela
     try:
         first_image, first_stem = next(source)
     except StopIteration:
         print("[ERRO] Nenhum frame/imagem disponível para anotar (verifique --start/--skip).")
         return
 
-    h0, w0 = first_image.shape[:2]
+    # tamanho máximo de exibição (a imagem original nunca é alterada, só a exibição na tela)
+    screen_w, screen_h = get_screen_size()
+    max_display_w = max(400, int(screen_w * 0.9))
+    max_display_h = max(300, int(screen_h * 0.85))
 
-    # cria janela e ajusta ao tamanho original do primeiro frame/imagem
-    cv2.namedWindow('Frame', cv2.WINDOW_NORMAL)
-    cv2.resizeWindow('Frame', w0, h0)
-    cv2.setMouseCallback('Frame', mouse_cb)
+    # WINDOW_AUTOSIZE: a janela sempre tem o mesmo tamanho da imagem exibida, garantindo que as
+    # coordenadas do mouse informadas pelo OpenCV correspondam exatamente ao que foi desenhado.
+    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_AUTOSIZE)
+    cv2.setMouseCallback(WINDOW_NAME, mouse_cb)
+    print("[INFO] Se as teclas (s/n/u/r/q) não responderem, clique uma vez na janela da imagem "
+          "para dar foco a ela antes de pressionar a tecla.")
 
     saved_count = 0
     full_source = itertools.chain([(first_image, first_stem)], source)
@@ -257,15 +327,21 @@ def main():
         image = src_image.copy()
         image_copy = src_image.copy()
         h, w = image.shape[:2]
+        display_scale = compute_display_scale(w, h, max_display_w, max_display_h)
         bboxes = []
         awaiting_class_input = False
         pending_bbox = {}
 
+        # traz a janela para frente ao trocar de frame/imagem
+        bring_window_to_front()
+
         while True:
-            # exibe a imagem com caixas atuais
+            # exibe a imagem com caixas já salvas + o bbox pendente (se houver), evitando que
+            # ele "desapareça" enquanto aguardamos o ID da classe no terminal
             disp = image.copy()
             draw_all_boxes(disp, bboxes)
-            cv2.imshow('Frame', disp)
+            draw_pending_box(disp, pending_bbox)
+            show_frame(disp)
 
             # se acabamos de desenhar um bbox, pedir a classe no terminal
             if awaiting_class_input:
@@ -281,17 +357,17 @@ def main():
                         cls_str = input("Digite o ID numérico da classe para este BBOX (ex.: 0, 1, 2...): ").strip()
                         cls_id = int(cls_str)
                         bboxes.append({"pt1": (x1, y1), "pt2": (x2, y2), "cls": cls_id})
-                        print(f"[OK] BBOX adicionado com classe {cls_id}. Total no frame: {len(bboxes)}")
-
-                        # refresh visual imediato
-                        image_copy[:] = image
-                        draw_all_boxes(image_copy, bboxes)
-                        cv2.imshow('Frame', image_copy)
-                        cv2.waitKey(1)
+                        print(f"[OK] BBOX adicionado com classe {cls_id}. Total no frame/imagem: {len(bboxes)}")
                     except ValueError:
                         print("[ERRO] Valor inválido. BBOX descartado.")
                     awaiting_class_input = False
                     pending_bbox = {}
+
+                    # refresh visual imediato + devolve o foco à janela (input() no terminal o rouba)
+                    image_copy[:] = image
+                    draw_all_boxes(image_copy, bboxes)
+                    show_frame(image_copy)
+                    bring_window_to_front()
 
             key = cv2.waitKey(1) & 0xFF
 

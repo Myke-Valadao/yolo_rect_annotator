@@ -7,8 +7,9 @@ After drawing each box, you type the **numeric class ID** in the terminal.
 
 ## ✨ Features
 - Annotate a **video** or a **set of images** (folder, glob pattern, or a single file) with the same tool.
-- Interactive annotation of multiple BBOX per frame/image.
+- Interactive annotation of **multiple BBOX per frame/image** — draw as many boxes as needed before saving.
 - Manual input of **class ID** after each drawn BBOX.
+- Large images/frames are automatically scaled down to fit your screen for display only — saved files always keep the original resolution.
 - Output in **YOLOv5/YOLOv8 format**:
 
 All coordinates are **normalized** (0–1).
@@ -89,3 +90,9 @@ n → go to next frame/image (discard unsaved BBOX)
 u → undo last BBOX
 
 r → remove all BBOX in the current frame/image
+
+## 🩹 Troubleshooting
+
+- **Key presses (`s`, `n`, `u`, `r`, `q`) don't seem to do anything**: after typing the class ID, focus goes to the terminal. Click once on the image window to give it focus back, then press the key. The tool also tries to bring the window to front automatically after each class-ID prompt.
+- **The box I just drew disappears while I'm typing the class ID**: this is expected — the pending box (labeled `id?`) stays visible until you answer the prompt; once you type a valid class ID it becomes a permanent green box.
+- **The image is too big for my screen**: the window automatically scales down large images/frames to fit your screen. This only affects what's displayed — the saved `.jpg`/`.txt` files always use the original resolution and coordinates.
